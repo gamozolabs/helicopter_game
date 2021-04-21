@@ -31,6 +31,11 @@ struct Player {
 
 #[macroquad::main("BasicShapes")]
 async fn main() {
+    /// Decrease game physics updates by this factor. This allows us to slow
+    /// down the speed of the game without slowing down the frame rate.
+    /// 1 means no slowdown
+    const ARTIFICAL_SLOWDOWN: u64 = 1;
+
     let mut player = Player {
         x:      30.,
         y:      30.,
@@ -44,9 +49,9 @@ async fn main() {
         
         // Draw the game boundaries
         draw_rectangle_lines(GAME_X - 1., GAME_Y - 1.,
-                             GAME_WIDTH + 2., GAME_HEIGHT + 2., 1., GRAY);
+                             GAME_WIDTH + 2., GAME_HEIGHT + 2., 2., GRAY);
 
-        if frame % 4 == 0 {
+        if frame % ARTIFICAL_SLOWDOWN == 0 {
             // Fly if the player is clicking
             if is_mouse_button_down(MouseButton::Left) {
                 player.yspeed -= 2.;
