@@ -36,6 +36,8 @@ async fn main() {
     /// 1 means no slowdown
     const ARTIFICAL_SLOWDOWN: u64 = 1;
 
+    let mut score = 0u64;
+
     let mut player = Player {
         x:      30.,
         y:      30.,
@@ -64,13 +66,15 @@ async fn main() {
             // Adjust the Y position of the player
             player.y = (player.y + player.yspeed)
                 .clamp(0., GAME_HEIGHT - player.height);
+
+            score += 1;
         }
 
         // Draw the player
         draw_rectangle(GAME_X + player.x, GAME_Y + player.y,
                        player.width, player.height, GREEN);
         
-        draw_text(&format!("FPS {:6} | Yspeed {:#018x}", get_fps(), player.yspeed.to_bits()), 0., 16., 16., WHITE);
+        draw_text(&format!("FPS {:6} | Score {:10} | Yspeed {:#010x}", get_fps(), score, player.yspeed.to_bits()), 0., 16., 16., WHITE);
         next_frame().await;
     }
 }
