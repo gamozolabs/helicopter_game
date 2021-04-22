@@ -8,3 +8,6 @@ edition = "2018"
 [dependencies]
 macroquad = "0.3.0"
 
+[profile.release]
+overflow-checks = true
+
