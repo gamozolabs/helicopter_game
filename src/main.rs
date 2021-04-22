@@ -1,81 +1,171 @@
+use core::convert::{TryFrom, TryInto};
+use std::error::Error;
 use macroquad::prelude::*;
 
-/// Game field X coord
-const GAME_X: f32 = 20.;
+/// A very generic error type
+type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
-/// Game field Y coord
-const GAME_Y: f32 = 60.;
+/// The divisor we use for fixed point conversion
+const FIXED_POINT_DIVISOR: i16 = 40;
 
-/// Width of the game field
-const GAME_WIDTH:  f32 = 800.;
+/// Width of the internal game field
+const GAME_FIELD_WIDTH:  Fxpt = Fxpt(800 * FIXED_POINT_DIVISOR);
 
-/// Height of the game field
-const GAME_HEIGHT: f32 = 600.;
+/// Height of the internal game field
+const GAME_FIELD_HEIGHT: Fxpt = Fxpt(600 * FIXED_POINT_DIVISOR);
 
-/// Gravity
-const GRAVITY: f32 = 1.25;
+/// Player X coord
+const PLAYER_X: Fxpt = Fxpt(20 * FIXED_POINT_DIVISOR);
 
-/// Friction
-const FRICTION: f32 = 0.9;
+/// Width and height dimension of the players collision square
+const PLAYER_SIZE: Fxpt = Fxpt(40 * FIXED_POINT_DIVISOR);
 
-/// The player
-struct Player {
-    x: f32,
-    y: f32,
+/// A fixed point integer, converting to a float is done by dividing by
+/// [`FIXED_POINT_DIVISOR`]
+#[derive(Clone, Copy)]
+struct Fxpt(i16);
 
-    width:  f32,
-    height: f32,
+impl TryFrom<i16> for Fxpt {
+    type Error = Box<dyn Error>;
 
-    yspeed: f32,
+    fn try_from(val: i16) -> Result<Self> {
+        val.checked_mul(FIXED_POINT_DIVISOR)
+            .map(|x| Fxpt(x))
+            .ok_or_else(|| "Integer overflow on i16 to Fxpt".into())
+    }
+}
+
+impl TryFrom<Fxpt> for f32 {
+    type Error = Box<dyn Error>;
+
+    fn try_from(val: Fxpt) -> Result<Self> {
+        let tmp = val.0 as f32 / FIXED_POINT_DIVISOR as f32;
+        if tmp.is_finite() {
+            Ok(tmp)
+        } else {
+            Err("Fixed-point conversion to f32 was not finite".into())
+        }
+    }
+}
+
+/// An object to render onto the screen
+#[derive(Clone, Copy)]
+enum Object {
+    /// Draw a rectangle
+    Rectangle { x: Fxpt, y: Fxpt, width: Fxpt, height: Fxpt, color: Color },
+
+    /// Draw a polygon
+    Polygon {
+        x: Fxpt, y: Fxpt, sides: u8,
+        radius: Fxpt, rotation: Fxpt, color: Color,
+    },
+}
+
+/// The game field which is used for the deterministic game. All dimensions
+/// and positions are based on fixed-point
+struct GameField {
+    /// Number of frames rendered (first frame during rendering will observe
+    /// this as zero). Thus, this is incremented _after_ rendering is complete
+    frames: u64,
+
+    /// Player Y coord
+    player_y: Fxpt,
+
+    /// List of [`Object`]s to draw
+    objects: Vec<Object>,
+}
+
+impl GameField {
+    fn new() -> Self {
+        Self {
+            frames:   0,
+            player_y: Fxpt(GAME_FIELD_HEIGHT.0 / 2),
+            objects:  Vec::new(),
+        }
+    }
+
+    /// Draw a player where ([`PLAYER_X`], `self.player_y`) is the top left
+    /// coord of the players collision square which is [`PLAYER_SIZE`]
+    fn draw_player(&mut self) {
+        // Default player
+        self.objects.push(Object::Rectangle {
+            x:      PLAYER_X,
+            y:      self.player_y,
+            width:  PLAYER_SIZE,
+            height: PLAYER_SIZE,
+            color:  RED,
+        });
+    }
+
+    fn render(&mut self) -> Result<()> {
+        let offset_x = 10.;
+        let offset_y = 50.;
+        let target_w = screen_width()  - offset_x - 10.;
+        let target_h = screen_height() - offset_y - 10.;
+        let scale_x  = target_w / f32::try_from(GAME_FIELD_WIDTH)?;
+        let scale_y  = target_h / f32::try_from(GAME_FIELD_HEIGHT)?;
+
+        // Pick the smaller of the two scales and maintain aspect ratio
+        let scale = scale_x.min(scale_y);
+
+        // Recompute targets
+        let target_w = scale * f32::try_from(GAME_FIELD_WIDTH)?;
+        let target_h = scale * f32::try_from(GAME_FIELD_HEIGHT)?;
+
+        // Clear all render objects
+        self.objects.clear();
+        
+        // Add the player to the object list
+        self.draw_player();
+        
+        // Clear the background
+        clear_background(BLACK);
+
+        // Draw the game field bounding box
+        draw_rectangle_lines(offset_x, offset_y, target_w, target_h, 2., BLUE);
+
+        // Render the objects
+        for object in &self.objects {
+            match object {
+                &Object::Rectangle { x, y, width, height, color } => {
+                    draw_rectangle(
+                        f32::try_from(x)? * scale + offset_x,
+                        f32::try_from(y)? * scale + offset_y,
+                        f32::try_from(width)?  * scale,
+                        f32::try_from(height)? * scale,
+                        color);
+                }
+                &Object::Polygon { x, y, sides, radius, rotation, color } => {
+                    draw_poly(
+                        f32::try_from(x)? * scale + offset_x,
+                        f32::try_from(y)? * scale + offset_y,
+                        sides,
+                        f32::try_from(radius)? * scale,
+                        rotation.try_into()?,
+                        color);
+                }
+            }
+        }
+        
+        draw_text(&format!("FPS {}", get_fps()), 0., 16., 16., WHITE);
+
+        // End of rendering
+        self.frames += 1;
+        Ok(())
+    }
+}
+
+async fn game() -> Result<()> {
+    let mut field = GameField::new();
+
+    loop {
+        field.render()?;
+        next_frame().await;
+    }
 }
 
 #[macroquad::main("BasicShapes")]
 async fn main() {
-    /// Decrease game physics updates by this factor. This allows us to slow
-    /// down the speed of the game without slowing down the frame rate.
-    /// 1 means no slowdown
-    const ARTIFICAL_SLOWDOWN: u64 = 1;
-
-    let mut score = 0u64;
-
-    let mut player = Player {
-        x:      30.,
-        y:      30.,
-        width:  64.,
-        height: 64.,
-        yspeed: 0.,
-    };
-
-    for frame in 1u64.. {
-        clear_background(BLACK);
-        
-        // Draw the game boundaries
-        draw_rectangle_lines(GAME_X - 1., GAME_Y - 1.,
-                             GAME_WIDTH + 2., GAME_HEIGHT + 2., 2., GRAY);
-
-        if frame % ARTIFICAL_SLOWDOWN == 0 {
-            // Fly if the player is clicking
-            if is_mouse_button_down(MouseButton::Left) {
-                player.yspeed -= 2.;
-            }
-
-            // Apply gravity and friction
-            player.yspeed += GRAVITY;
-            player.yspeed *= FRICTION;
-
-            // Adjust the Y position of the player
-            player.y = (player.y + player.yspeed)
-                .clamp(0., GAME_HEIGHT - player.height);
-
-            score += 1;
-        }
-
-        // Draw the player
-        draw_rectangle(GAME_X + player.x, GAME_Y + player.y,
-                       player.width, player.height, GREEN);
-        
-        draw_text(&format!("FPS {:6} | Score {:10} | Yspeed {:#010x}", get_fps(), score, player.yspeed.to_bits()), 0., 16., 16., WHITE);
-        next_frame().await;
-    }
+    game().await.expect("Failed to run game");
 }
 
