@@ -1,4 +1,5 @@
 use std::error::Error;
+use std::collections::VecDeque;
 use macroquad::prelude::*;
 
 /// A very generic error type
@@ -8,7 +9,8 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 const SCALE_OUTPUT: bool = true;
 
 /// The divisor we use for fixed point conversion
-const FIXED_POINT_DIVISOR: i16 = 32;
+const FIXED_POINT_SHIFT:   u32 = 5;
+const FIXED_POINT_DIVISOR: i16 = 1 << FIXED_POINT_SHIFT;
 
 /// Width of the internal game field
 const GAME_FIELD_WIDTH:  Fxpt = Fxpt(400 * FIXED_POINT_DIVISOR);
@@ -30,6 +32,9 @@ const GRAVITY: Fxpt = Fxpt((1.6 * FIXED_POINT_DIVISOR as f32) as i16);
 
 /// Friction the player experiences
 const FRICTION: Fxpt = Fxpt((0.9 * FIXED_POINT_DIVISOR as f32) as i16);
+
+/// Speed change upon input on each frame
+const INPUT_IMPULSE: Fxpt = Fxpt(2 * FIXED_POINT_DIVISOR);
 
 /// A fixed point integer, converting to a float is done by dividing by
 /// [`FIXED_POINT_DIVISOR`]
@@ -129,6 +134,13 @@ struct GameField {
 
     /// Tracks if we lost
     dead: bool,
+
+    /// Tracks if we should replay the `inputs` rather than use interactive
+    /// inputs
+    replay: Option<VecDeque<u8>>,
+
+    /// Tracks the mouse input state each physics frame
+    inputs: VecDeque<u8>,
 }
 
 impl GameField {
@@ -147,6 +159,8 @@ impl GameField {
             last_obstacle:  0,
             wall_skew:      Fxpt(0),
             dead:           false,
+            replay:         None,
+            inputs:         VecDeque::new(),
         }
     }
 
@@ -166,7 +180,16 @@ impl GameField {
         });
     }
 
-    fn render(&mut self) -> Result<()> {
+    /// A color generator from Desu_Used
+    fn pastel_rainbow(x: f32) -> (u8, u8, u8) {
+        const TAU: f32 = core::f32::consts::PI * 2.0;
+        let r = (x * TAU + 0.274).sin() * 40.0 + 213.0;
+        let g = (x * TAU - 1.616).sin() * 40.0 + 213.0;
+        let b = (x * TAU - 3.918).sin() * 46.0 + 207.0;
+        (r as u8, g as u8, b as u8)
+    }
+
+    fn render(&mut self) -> Result<bool> {
         let offset_x = 10.;
         let offset_y = 50.;
         let (target_w, target_h) = if SCALE_OUTPUT {
@@ -183,13 +206,23 @@ impl GameField {
         // Recompute targets
         let target_w = scale * f32::from(GAME_FIELD_WIDTH);
         let target_h = scale * f32::from(GAME_FIELD_HEIGHT);
+            
+        if self.dead && is_key_pressed(KeyCode::Space) {
+            return Ok(true);
+        }
 
         let time = get_time();
         if !self.dead && time - self.last_frame >= 1. / 60. {
             // Update player speed if we're flying
-            if is_mouse_button_down(MouseButton::Left) {
+            if (self.replay.is_none() &&
+                    is_mouse_button_down(MouseButton::Left)) ||
+                    self.replay.as_mut()
+                        .and_then(|x| x.pop_front()) == Some(b'1') {
                 self.player_speed =
-                    Fxpt(self.player_speed.0 - Fxpt::from(3).0);
+                    Fxpt(self.player_speed.0 - INPUT_IMPULSE.0);
+                self.inputs.push_back(b'1');
+            } else {
+                self.inputs.push_back(b'0');
             }
             
             // Move the map (both walls and obstacles)
@@ -259,7 +292,7 @@ impl GameField {
             // Apply physics
             self.player_speed = Fxpt(self.player_speed.0 + GRAVITY.0);
             self.player_speed =
-                Fxpt((self.player_speed.0 / FIXED_POINT_DIVISOR) * FRICTION.0);
+                Fxpt((self.player_speed.0 >> FIXED_POINT_SHIFT) * FRICTION.0);
 
             // Adjust player position
             self.player_y = Fxpt(self.player_y.0 + self.player_speed.0);
@@ -303,12 +336,15 @@ impl GameField {
             let end =
                 (obstacle.x.0 + obstacle.width.0).min(GAME_FIELD_WIDTH.0);
 
+            let (r, g, b) = Self::pastel_rainbow(
+                f32::from(obstacle.x) * 0.003);
+
             self.objects.push(Object::Rectangle {
                 x:      Fxpt(x),
                 y:      obstacle.y,
                 width:  Fxpt(end - x),
                 height: obstacle.height,
-                color:  Color::from_rgba(0x80, 0x80, obstacle.x.0 as u8, 0xff),
+                color:  Color::from_rgba(r, g, b, 0xff),
             });
         }
         
@@ -343,24 +379,53 @@ impl GameField {
                 }
             }
         }
-        
-        draw_text(&format!("Average FPS {:9.3} | Score {:10}",
-            self.frames as f64 / (get_time() - self.start_time),
-            self.physics_frames),
-            0., 20., 32., WHITE);
 
         // End of rendering
         self.frames += 1;
-        Ok(())
+        Ok(false)
     }
 }
 
 async fn game() -> Result<()> {
-    let mut field = GameField::new();
+    // Run the replay file if there is an arg
+    let replay: Option<VecDeque<u8>> = std::env::args().nth(1).map(|x| {
+        std::fs::read(x).expect("Failed to load replay input").into()
+    });
 
-    loop {
-        field.render()?;
-        next_frame().await;
+    let mut high_score = 0u64;
+
+    'restart: loop {
+        let mut field = GameField::new();
+        field.replay = replay.clone();
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut new_score = false;
+
+        loop {
+            if field.render()? {
+                #[cfg(not(target_arch = "wasm32"))]
+                if new_score {
+                    std::fs::write("inputs.bin",
+                        field.inputs.iter().copied().collect::<Vec<_>>())?;
+                }
+                continue 'restart;
+            }
+       
+            if field.physics_frames > high_score {
+                #[cfg(not(target_arch = "wasm32"))]
+                { new_score = true; }
+
+                high_score = field.physics_frames;
+            }
+
+            draw_text(&format!("Average FPS {:9.3} | Score {:10} | \
+                                High score {:10} | {:10.3}",
+                field.frames as f64 / (get_time() - field.start_time),
+                field.physics_frames, high_score, field.player_speed.0),
+                0., 20., 32., WHITE);
+
+            next_frame().await;
+        }
     }
 }
 
